@@ -43,3 +43,43 @@ class TensorizedQDA(QDA):
     def _predict_one(self, x):
         # return the class that has maximum a posteriori probability
         return np.argmax(self.log_a_priori + self._predict_log_conditionals(x))
+
+
+class FasterQDA(TensorizedQDA):
+    """Predict multiple observations in a single pass without Python-level loops.
+
+    Uses stacked tensors produced in _fit_params (k, p, p) and (k, p, 1)
+    to compute the quadratic form for all classes and all observations
+    while avoiding the n x n interaction matrix.
+    """
+
+    def predict(self, X):
+        # X expected shape: (p, n)
+        if X.ndim != 2:
+            raise ValueError("X must be a 2D array with shape (p, n)")
+
+        # Build stacked tensors if not already present
+        if not hasattr(self, 'tensor_inv_cov') or not hasattr(self, 'tensor_means'):
+            # ensure fit was called
+            raise RuntimeError("Model parameters not found. Call fit(...) before predict().")
+
+        # unbiased: shape (k, p, n)
+        unbiased = X[np.newaxis, :, :] - self.tensor_means
+
+        # transformed = tensor_inv_cov @ unbiased  -> shape (k, p, n)
+        transformed = np.einsum('kij,kjn->kin', self.tensor_inv_cov, unbiased)
+
+        # quadratic form per class and observation: sum over p -> shape (k, n)
+        quad = np.sum(transformed * unbiased, axis=1)
+
+        # log det per class: shape (k,)
+        log_det = 0.5 * np.log(LA.det(self.tensor_inv_cov))
+
+        # log conditional per class x obs: (k, n)
+        log_cond = log_det[:, None] - 0.5 * quad
+
+        # add log a priori and pick argmax across classes
+        scores = self.log_a_priori[:, None] + log_cond
+
+        preds = np.argmax(scores, axis=0)
+        return preds.reshape(1, -1)
